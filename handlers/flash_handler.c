@@ -201,10 +201,11 @@ static int flash_write_nand(int mtdnum, struct img_type *img)
 		ERROR("Image %s does not fit into mtd%d", img->fname, mtdnum);
 		return -EIO;
 	}
-	/* Flashing to NAND is currently not streamable */
-	if (img->install_directly) {
-		ERROR("Raw NAND not streamable");
-		return -EINVAL;
+    /* erase mtd must */
+    if(flash_erase(mtdnum)) {
+		ERROR("I cannot erasing %s",
+			img->device);
+		return -1;
 	}
 
 	memset(&out, 0, sizeof(out));
