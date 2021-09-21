@@ -61,42 +61,135 @@ static inline int buffer_check_pattern(unsigned char *buffer, size_t size,
         return !memcmp(buffer, buffer + 1, size - 1);
 }
 
+struct mtd_out {
+	int fd;
+	struct mtd_dev_info *mtd;
+	struct flash_description *flash;
+	void *buf;
+	int buf_max;
+	int buf_pos;
+	int eb_pos;
+};
 
-/*
- * Writing to the NAND must take into account ECC errors
- * and BAD sectors.
- * This is not required for NOR flashes
- * The function reassembles nandwrite from mtd-utils
- * dropping all options that are not required here.
- */
-
-static void erase_buffer(void *buffer, size_t size)
+static int nand_write_eb(struct mtd_out *mo)
 {
-	const uint8_t kEraseByte = 0xff;
+	int ret = 0;
+	struct mtd_dev_info *mtd = mo->mtd;
+	struct flash_description *flash = mo->flash;
+	int eb_pos = mo->eb_pos;
+	int fill_sz;
 
-	if (buffer != NULL && size > 0)
-		memset(buffer, kEraseByte, size);
+	while (1) {
+		/*find an good eb*/
+		while (eb_pos <= mtd->size / mtd->eb_size) {
+			ret = mtd_is_bad(mtd, mo->fd, eb_pos);
+			if (ret == 0)
+				break;
+			if (ret < 0) {
+				ERROR("mtd%d: MTD get bad block failed", mtd->mtd_num);
+				goto exit;
+			}
+			/*ret=1 bad block*/
+			eb_pos++;
+		}
+		/* if all 'ff' no need write*/
+		if (buffer_check_pattern(mo->buf, mo->buf_pos, 0xff)) {
+			ret = 0;
+			break;
+		}
+		/* if write size uneq n*mtd->min_io_size need fill*/
+		fill_sz = mo->buf_pos % mtd->min_io_size;
+		if (fill_sz > 0) {
+			fill_sz = mtd->min_io_size - fill_sz;
+			memset(mo->buf + mo->buf_pos, 0xff, fill_sz);
+			mo->buf_pos += fill_sz;
+		}
+
+		/* Write out data to flash */
+		ret = mtd_write(flash->libmtd, mtd, mo->fd, eb_pos,
+						0, mo->buf, mo->buf_pos, NULL, 0, MTD_OPS_PLACE_OOB);
+		if (ret == 0) {
+			break;
+		}
+		/* err do*/
+		if (errno != EIO) {
+			ERROR("mtd%d: MTD write failure", mtd->mtd_num);
+			goto exit;
+		}
+		ret = mtd_erase(flash->libmtd, mtd, mo->fd, eb_pos);
+		if (ret < 0) {
+			int errno_tmp = errno;
+			TRACE("mtd%d: MTD Erase failure", mtd->mtd_num);
+			if (errno_tmp != EIO)
+				goto exit;
+		}
+
+		TRACE("Marking block at %08x bad", eb_pos * mtd->eb_size);
+		ret = mtd_mark_bad(mtd, mo->fd, eb_pos);
+		if (ret < 0) {
+			ERROR("mtd%d: MTD Mark bad block failure", mtd->mtd_num);
+			goto exit;
+		}
+
+		eb_pos += 1;
+	}
+
+exit:
+	mo->eb_pos = eb_pos;
+	return ret;
+}
+
+static int mtd_out_fun(void *out, const void *buf, unsigned int len)
+{
+	int ret;
+	struct mtd_out *mo = (struct mtd_out *)out;
+	int cp_len, cp_pos;
+	char *dstbuf;
+	char *srcbuf;
+
+	/* if len=0 its the last package write to and end. */
+	if (len == 0) {
+		if (mo->buf_pos == 0)
+			return 0;
+		ret = nand_write_eb(mo);
+		return ret;
+	}
+	/* copy and write */
+	cp_pos = 0;
+	while (len > 0) {
+		/* copy to buf */
+		if (mo->buf_pos + len > mo->buf_max)
+			cp_len = mo->buf_max - mo->buf_pos;
+		else
+			cp_len = len;
+
+		dstbuf = mo->buf;
+		srcbuf = (char *)buf;
+		memcpy(&dstbuf[mo->buf_pos], &srcbuf[cp_pos], cp_len);
+		len -= cp_len;
+		cp_pos += cp_len;
+		mo->buf_pos += cp_len;
+		/* need write to */
+		if (mo->buf_pos == mo->buf_max) {
+			ret = nand_write_eb(mo);
+			if (ret != 0) {
+				return -1;
+			}
+			mo->buf_pos = 0;
+			mo->eb_pos += 1;
+		}
+	}
+
+	return 0;
 }
 
 static int flash_write_nand(int mtdnum, struct img_type *img)
 {
+	int ret;
 	char mtd_device[LINESIZE];
+	struct mtd_out out;
 	struct flash_description *flash = get_flash_info();
 	struct mtd_dev_info *mtd = &flash->mtd_info[mtdnum].mtd;
-	int pagelen;
-	bool baderaseblock = false;
-	long long imglen = 0;
-	long long blockstart = -1;
-	long long offs;
-	unsigned char *filebuf = NULL;
-	size_t filebuf_max = 0;
-	size_t filebuf_len = 0;
-	long long mtdoffset = 0;
-	int ifd = img->fdin;
-	int fd = -1;
-	bool failed = true;
-	int ret;
-	unsigned char *writebuf = NULL;
 
 	/*
 	 * if nothing to do, returns without errors
@@ -104,188 +197,50 @@ static int flash_write_nand(int mtdnum, struct img_type *img)
 	if (!img->size)
 		return 0;
 
-	pagelen = mtd->min_io_size;
-	imglen = img->size;
-	snprintf(mtd_device, sizeof(mtd_device), "/dev/mtd%d", mtdnum);
-
-	if ((imglen / pagelen) * mtd->min_io_size > mtd->size) {
+	if (img->size > mtd->size) {
 		ERROR("Image %s does not fit into mtd%d", img->fname, mtdnum);
 		return -EIO;
 	}
-
 	/* Flashing to NAND is currently not streamable */
 	if (img->install_directly) {
 		ERROR("Raw NAND not streamable");
 		return -EINVAL;
 	}
 
-	if(flash_erase_sector(mtdnum, img->offset, img->size)) {
-		ERROR("I cannot erasing %s",
-			img->device);
-		return -1;
+	memset(&out, 0, sizeof(out));
+
+	out.buf_max = mtd->eb_size / mtd->min_io_size * mtd->min_io_size;
+	out.buf = calloc(1, out.buf_max);
+	if (out.buf == NULL) {
+		ERROR("%s: calloc mem err: %s", __func__, strerror(errno));
+		return -ENOMEM;
 	}
 
-	if ((fd = open(mtd_device, O_RDWR)) < 0) {
-		ERROR( "%s: %s: %s", __func__, mtd_device, strerror(errno));
+	snprintf(mtd_device, sizeof(mtd_device), "/dev/mtd%d", mtdnum);
+	if ((out.fd = open(mtd_device, O_RDWR)) < 0) {
+		ERROR("%s: %s: %s", __func__, mtd_device, strerror(errno));
+		free(out.buf);
 		return -ENODEV;
 	}
 
-	filebuf_max = mtd->eb_size / mtd->min_io_size * pagelen;
-	filebuf = calloc(1, filebuf_max);
-	erase_buffer(filebuf, filebuf_max);
-
-	/*
-	 * Get data from input and write to the device while there is
-	 * still input to read and we are still within the device
-	 * bounds. Note that in the case of standard input, the input
-	 * length is simply a quasi-boolean flag whose values are page
-	 * length or zero.
-	 */
-	while ((imglen > 0 || writebuf < filebuf + filebuf_len)
-		&& mtdoffset < mtd->size) {
-		/*
-		 * New eraseblock, check for bad block(s)
-		 * Stay in the loop to be sure that, if mtdoffset changes because
-		 * of a bad block, the next block that will be written to
-		 * is also checked. Thus, we avoid errors if the block(s) after the
-		 * skipped block(s) is also bad
-		 */
-		while (blockstart != (mtdoffset & (~mtd->eb_size + 1))) {
-			blockstart = mtdoffset & (~mtd->eb_size + 1);
-			offs = blockstart;
-
-			/*
-			 * if writebuf == filebuf, we are rewinding so we must
-			 * not reset the buffer but just replay it
-			 */
-			if (writebuf != filebuf) {
-				erase_buffer(filebuf, filebuf_len);
-				filebuf_len = 0;
-				writebuf = filebuf;
-			}
-
-			baderaseblock = false;
-
-			do {
-				ret = mtd_is_bad(mtd, fd, offs / mtd->eb_size);
-				if (ret < 0) {
-					ERROR("mtd%d: MTD get bad block failed", mtdnum);
-					goto closeall;
-				} else if (ret == 1) {
-					baderaseblock = true;
-				}
-
-				if (baderaseblock) {
-					mtdoffset = blockstart + mtd->eb_size;
-
-					if (mtdoffset > mtd->size) {
-						ERROR("too many bad blocks, cannot complete request");
-						goto closeall;
-					}
-				}
-
-				offs +=  mtd->eb_size;
-			} while (offs < blockstart + mtd->eb_size);
-		}
-
-		/* Read more data from the input if there isn't enough in the buffer */
-		if (writebuf + mtd->min_io_size > filebuf + filebuf_len) {
-			size_t readlen = mtd->min_io_size;
-			size_t alreadyread = (filebuf + filebuf_len) - writebuf;
-			size_t tinycnt = alreadyread;
-			ssize_t cnt = 0;
-
-			while (tinycnt < readlen) {
-				cnt = read(ifd, writebuf + tinycnt, readlen - tinycnt);
-				if (cnt == 0) { /* EOF */
-					break;
-				} else if (cnt < 0) {
-					ERROR("File I/O error on input");
-					goto closeall;
-				}
-				tinycnt += cnt;
-			}
-
-			/* No padding needed - we are done */
-			if (tinycnt == 0) {
-				imglen = 0;
-				break;
-			}
-
-			/* Padding */
-			if (tinycnt < readlen) {
-				erase_buffer(writebuf + tinycnt, readlen - tinycnt);
-			}
-
-			filebuf_len += readlen - alreadyread;
-
-			imglen -= tinycnt - alreadyread;
-
-		}
-
-		ret =0;
-		if (!buffer_check_pattern(writebuf, mtd->min_io_size, 0xff)) {
-			/* Write out data */
-			ret = mtd_write(flash->libmtd, mtd, fd, mtdoffset / mtd->eb_size,
-					mtdoffset % mtd->eb_size,
-					writebuf,
-					mtd->min_io_size,
-					NULL,
-					0,
-					MTD_OPS_PLACE_OOB);
-		}
-		if (ret) {
-			long long i;
-			if (errno != EIO) {
-				ERROR("mtd%d: MTD write failure", mtdnum);
-				goto closeall;
-			}
-
-			/* Must rewind to blockstart if we can */
-			writebuf = filebuf;
-
-			for (i = blockstart; i < blockstart + mtd->eb_size; i += mtd->eb_size) {
-				if (mtd_erase(flash->libmtd, mtd, fd, i / mtd->eb_size)) {
-					int errno_tmp = errno;
-					TRACE("mtd%d: MTD Erase failure", mtdnum);
-					if (errno_tmp != EIO)
-						goto closeall;
-				}
-			}
-
-			TRACE("Marking block at %08llx bad",
-					mtdoffset & (~mtd->eb_size + 1));
-			if (mtd_mark_bad(mtd, fd, mtdoffset / mtd->eb_size)) {
-				ERROR("mtd%d: MTD Mark bad block failure", mtdnum);
-				goto closeall;
-			}
-			mtdoffset = blockstart + mtd->eb_size;
-
-			continue;
-		}
-
-		/*
-		 * this handler does not use copyfile()
-		 * and must update itself the progress bar
-		 */
-		swupdate_progress_update((img->size - imglen) * 100 / img->size);
-
-		mtdoffset += mtd->min_io_size;
-		writebuf += pagelen;
+	out.mtd = mtd;
+	out.flash = flash;
+	ret = copyimage(&out, img, mtd_out_fun);
+	if (ret < 0) {
+		goto exit;
 	}
-	failed = false;
-
-closeall:
-	free(filebuf);
-	close(fd);
-
-	if (failed) {
+	/* endof write call writeimage,buf=NULL len=0 */
+	ret = mtd_out_fun(&out, NULL, 0);
+exit:
+	if (ret < 0) {
 		ERROR("Installing image %s into mtd%d failed",
-			img->fname,
-			mtdnum);
+			  img->fname,
+			  mtdnum);
 		return -1;
 	}
 
+	free(out.buf);
+	close(out.fd);
 	return 0;
 }
 
