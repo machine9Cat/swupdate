@@ -46,7 +46,7 @@ typedef struct {
 	bool usetokentodwl;
 	unsigned int initial_report_resend_period;
     char *update_identify_cmd;
-    swupdate_cfg_handle *cfg_handle;
+    char * globle_cfg;
 } server_hawkbit_t;
 
 extern server_hawkbit_t server_hawkbit;

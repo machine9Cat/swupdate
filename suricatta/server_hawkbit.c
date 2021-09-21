@@ -122,7 +122,7 @@ server_hawkbit_t server_hawkbit = {.url = NULL,
 				   .usetokentodwl = true,
 				   .cached_file = NULL,
                    .update_identify_cmd= NULL,
-                   .cfg_handle= NULL,
+                   .globle_cfg= NULL,
 				   .channel = NULL};
 
 static channel_data_t channel_data_defaults = {.debug = false,
@@ -1473,7 +1473,7 @@ int get_target_data_length(void)
 	return len;
 }
 
-static int update_identify(swupdate_cfg_handle *handle,const char *update_cmd){
+static int update_identify(const char *fname,const char *update_cmd){
     int ret;
     struct dict *dictionary;
     
@@ -1488,8 +1488,12 @@ static int update_identify(swupdate_cfg_handle *handle,const char *update_cmd){
 
     dict_drop_db(dictionary);
 
-    read_module_settings(handle, "identify", settings_into_dict, dictionary);
-
+    swupdate_cfg_handle handle;
+	swupdate_cfg_init(&handle);
+    if (swupdate_cfg_read_file(&handle, fname) == 0) {
+        read_module_settings(&handle, "identify", settings_into_dict, dictionary);
+    }
+    swupdate_cfg_destroy(&handle);
     return 0;
 }
 
@@ -1505,7 +1509,7 @@ server_op_res_t server_send_target_data(void)
 
 	assert(channel != NULL);
     /* update target data new */
-    update_identify(server_hawkbit.cfg_handle, server_hawkbit.update_identify_cmd);
+    update_identify(server_hawkbit.globle_cfg, server_hawkbit.update_identify_cmd);
 
 	len = get_target_data_length();
 
@@ -1721,9 +1725,11 @@ server_op_res_t server_start(char *fname, int argc, char *argv[])
 
 			read_module_settings(&handle, "custom-http-headers",
 					settings_into_dict, &server_hawkbit.httpheaders);
+            /* backup globle cfg name */        
+            SETSTRING(server_hawkbit.globle_cfg, fname);
 		}
 		swupdate_cfg_destroy(&handle);
-        server_hawkbit.cfg_handle = &handle;
+
 	}
 
 	if (loglevel >= DEBUGLEVEL) {
