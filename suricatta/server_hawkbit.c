@@ -526,7 +526,7 @@ server_op_res_t server_set_config_data(json_object *json_root)
 		if (server_hawkbit.configData_url)
 			free(server_hawkbit.configData_url);
 		server_hawkbit.configData_url = tmp;
-		server_hawkbit.has_to_send_configData = (get_target_data_length() > 0) ? true : false;
+		server_hawkbit.has_to_send_configData = true;
 		TRACE("ConfigData: %s", server_hawkbit.configData_url);
 	}
 	return SERVER_OK;
