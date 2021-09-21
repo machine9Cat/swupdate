@@ -30,6 +30,7 @@
 #include "parselib.h"
 #include "swupdate_settings.h"
 #include "swupdate_dict.h"
+#include "pctl.h"
 
 #define INITIAL_STATUS_REPORT_WAIT_DELAY 10
 
@@ -53,6 +54,7 @@ static struct option long_options[] = {
     {"initial-report-resend-period", required_argument, NULL, 'm'},
 	{"connection-timeout", required_argument, NULL, 's'},
 	{"custom-http-header", required_argument, NULL, 'a'},
+    {"updatecmd", required_argument, NULL, 'U'},
     {NULL, 0, NULL, 0}};
 
 static unsigned short mandatory_argument_count = 0;
@@ -119,6 +121,8 @@ server_hawkbit_t server_hawkbit = {.url = NULL,
 				   .update_action = NULL,
 				   .usetokentodwl = true,
 				   .cached_file = NULL,
+                   .update_identify_cmd= NULL,
+                   .cfg_handle= NULL,
 				   .channel = NULL};
 
 static channel_data_t channel_data_defaults = {.debug = false,
@@ -1469,6 +1473,26 @@ int get_target_data_length(void)
 	return len;
 }
 
+static int update_identify(swupdate_cfg_handle *handle,const char *update_cmd){
+    int ret;
+    struct dict *dictionary;
+    
+    /* do shell update */
+    ret = run_system_cmd(update_cmd);
+    if(ret!=0){
+        ERROR("update identify fail.(%s)",update_cmd);
+        return -1;
+    }
+
+    dictionary = &server_hawkbit.configdata;
+
+    dict_drop_db(dictionary);
+
+    read_module_settings(handle, "identify", settings_into_dict, dictionary);
+
+    return 0;
+}
+
 server_op_res_t server_send_target_data(void)
 {
 	channel_t *channel = server_hawkbit.channel;
@@ -1480,6 +1504,9 @@ server_op_res_t server_send_target_data(void)
 	char *url = NULL;
 
 	assert(channel != NULL);
+    /* update target data new */
+    update_identify(server_hawkbit.cfg_handle, server_hawkbit.update_identify_cmd);
+
 	len = get_target_data_length();
 
 	if (!len) {
@@ -1611,7 +1638,8 @@ void server_print_help(void)
 	    "sending initial state with '-c' option (default: %ds).\n"
 	    "\t  -s, --connection-timeout Set the server connection timeout (default: 300s).\n"
 	    "\t  -a, --custom-http-header <name> <value> Set custom HTTP header, "
-	    "appended to every HTTP request being sent.",
+	    "appended to every HTTP request being sent.\n"
+        "\t  -U, --updatecmd     Update identify cmd,it,s can a shell.\n",
 	    CHANNEL_DEFAULT_POLLING_INTERVAL, CHANNEL_DEFAULT_RESUME_TRIES,
 	    CHANNEL_DEFAULT_RESUME_DELAY,
 	    INITIAL_STATUS_REPORT_WAIT_DELAY);
@@ -1657,6 +1685,9 @@ static int server_hawkbit_settings(void *elem, void  __attribute__ ((__unused__)
 	GET_FIELD_STRING_RESET(LIBCFG_PARSER, elem, "gatewaytoken", tmp);
 	if (strlen(tmp))
 		SETSTRING(server_hawkbit.gatewaytoken, tmp);
+    GET_FIELD_STRING_RESET(LIBCFG_PARSER, elem, "updatecmd", tmp);
+    if (strlen(tmp)) 
+        SETSTRING(server_hawkbit.update_identify_cmd, tmp);
 
 	return 0;
 
@@ -1686,12 +1717,13 @@ server_op_res_t server_start(char *fname, int argc, char *argv[])
 			 * section
 			 */
 			read_module_settings(&handle, "hawkbit", server_hawkbit_settings, NULL);
-			read_module_settings(&handle, "identify", settings_into_dict, &server_hawkbit.configdata);
+			//read_module_settings(&handle, "identify", settings_into_dict, &server_hawkbit.configdata);
 
 			read_module_settings(&handle, "custom-http-headers",
 					settings_into_dict, &server_hawkbit.httpheaders);
 		}
 		swupdate_cfg_destroy(&handle);
+        server_hawkbit.cfg_handle = &handle;
 	}
 
 	if (loglevel >= DEBUGLEVEL) {
@@ -1702,7 +1734,7 @@ server_op_res_t server_start(char *fname, int argc, char *argv[])
 	/* reset to optind=1 to parse suricatta's argument vector */
 	optind = 1;
 	opterr = 0;
-	while ((choice = getopt_long(argc, argv, "t:i:c:u:p:xr:y::w:k:g:f:2:m:s:a:",
+	while ((choice = getopt_long(argc, argv, "t:i:c:u:p:xr:y::w:k:g:f:2:m:s:a:U:",
 				     long_options, NULL)) != -1) {
 		switch (choice) {
 		case 't':
@@ -1805,6 +1837,9 @@ server_op_res_t server_start(char *fname, int argc, char *argv[])
 				return SERVER_EINIT;
 
 			break;
+        case 'U':
+            SETSTRING(server_hawkbit.update_identify_cmd, optarg);
+            break;
 		/* Ignore not recognized options, they can be already parsed by the caller */
 		case '?':
 			break;
