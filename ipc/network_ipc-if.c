@@ -168,7 +168,7 @@ int swupdate_set_aes(char *key, char *ivt)
 	strncpy(msg.data.aeskeymsg.key_ascii, key, sizeof(msg.data.aeskeymsg.key_ascii) - 1);
 	strncpy(msg.data.aeskeymsg.ivt_ascii, ivt, sizeof(msg.data.aeskeymsg.ivt_ascii) - 1);
 
-	return ipc_send_cmd(&msg);
+	return ipc_send_cmd(&msg,0);
 }
 
 /*
@@ -203,7 +203,7 @@ int swupdate_set_version_range(const char *minversion,
 			sizeof(msg.data.versions.maximum_version) - 1);
 	}
 
-	return ipc_send_cmd(&msg);
+	return ipc_send_cmd(&msg,0);
 }
 
 void swupdate_prepare_req(struct swupdate_request *req) {

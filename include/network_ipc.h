@@ -123,7 +123,7 @@ void ipc_end(int connfd);
 int ipc_get_status(ipc_message *msg);
 int ipc_get_status_timeout(ipc_message *msg, unsigned int timeout_ms);
 int ipc_postupdate(ipc_message *msg);
-int ipc_send_cmd(ipc_message *msg);
+int ipc_send_cmd(ipc_message *msg, int timeout_ms);
 
 typedef int (*writedata)(char **buf, int *size);
 typedef int (*getstatus)(ipc_message *msg);

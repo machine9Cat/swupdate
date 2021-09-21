@@ -272,19 +272,38 @@ int ipc_wait_for_complete(getstatus callback)
 	return message.data.status.last_result;
 }
 
-int ipc_send_cmd(ipc_message *msg)
+int ipc_send_cmd(ipc_message *msg, int timeout_ms)
 {
 	int connfd = prepare_ipc();
-	if (connfd < 0)
+	int ret;
+    fd_set fds;
+	struct timeval tv;
+
+	if (connfd < 0) {
 		return -1;
+	}
 
 	/* TODO: Check source type */
 	msg->magic = IPC_MAGIC;
+	ret = write(connfd, msg, sizeof(*msg));
+	if (ret != sizeof(*msg)) {
+		close(connfd);
+		return -1;
+	}
 
-	int ret = write(connfd, msg, sizeof(*msg)) != sizeof(*msg) ||
-		read(connfd, msg, sizeof(*msg))  != sizeof(*msg);
-
+    if (!timeout_ms) {
+		ret = read(connfd, msg, sizeof(*msg));
+	} else {
+		FD_ZERO(&fds);
+		FD_SET(connfd, &fds);
+		tv.tv_sec = 0;
+		tv.tv_usec = timeout_ms * 1000;
+		ret = select(connfd + 1, &fds, NULL, NULL, &tv);
+		if (ret <= 0 || !FD_ISSET(connfd, &fds))
+			return 0;
+		ret = read(connfd, msg, sizeof(*msg));
+	}
 	close(connfd);
 
-	return -ret;
+	return 0;
 }

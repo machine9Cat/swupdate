@@ -94,7 +94,7 @@ int main(int argc, char *argv[]) {
 	fprintf(stdout, "Sending: '%s'", msg.data.procmsg.buf);
 	msg.data.procmsg.len = strnlen(msg.data.procmsg.buf, sizeof(msg.data.procmsg.buf));
 
-	rc = ipc_send_cmd(&msg);
+	rc = ipc_send_cmd(&msg,3000);
 
 	fprintf(stdout, " returned %d\n", rc);
 	if (!rc)

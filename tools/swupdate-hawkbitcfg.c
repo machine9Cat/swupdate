@@ -48,7 +48,7 @@ static void send_msg(ipc_message *msg)
 	int rc;
 
 	fprintf(stdout, "Sending: '%s'", msg->data.procmsg.buf);
-	rc = ipc_send_cmd(msg);
+	rc = ipc_send_cmd(msg,0);
 
 	fprintf(stdout, " returned %d\n", rc);
 	if (rc == 0) {

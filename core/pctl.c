@@ -327,7 +327,8 @@ int run_system_cmd(const char *cmd)
 			struct timeval tv;
 			fd_set readfds;
 			int n, i;
-
+            wstatus = -1;   /* fix gyj,WNOHANG enable it can nothing assign 
+            the wstatus vale,wstatus =0 can make child process to fatherless */
 			w = waitpid(process_id, &wstatus, WNOHANG | WUNTRACED | WCONTINUED);
 			if (w == -1) {
 				ERROR("Error from waitpid() !!");
